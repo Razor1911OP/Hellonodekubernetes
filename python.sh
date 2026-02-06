@@ -118,7 +118,7 @@ kill "$FLASK_PID" >/dev/null 2>&1 || true
 
 echo "▶ Updating code..."
 
-sed -i 's/Hello World!/Hello, Cruel World!' main.py
+sed -i 's/Hello World!/Hello, Cruel World!/g' main.py
 
 # =================================================
 # RETEST
