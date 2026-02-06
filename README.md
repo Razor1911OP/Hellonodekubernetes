@@ -11,6 +11,11 @@ curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/
 sudo chmod +x test.sh
 ./test.sh
 ```
+```bash
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/test.sh
+sudo chmod +x test.sh
+./python.sh
+```
 
 ## Running the Test Script
 
