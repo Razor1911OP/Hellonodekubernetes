@@ -1,4 +1,4 @@
-# google cloud skills
+# Google Cloud Skills
 
 A tutorial project for deploying a Hello World Node.js application to Google Kubernetes Engine (GKE).
 
