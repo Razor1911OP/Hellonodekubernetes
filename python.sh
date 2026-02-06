@@ -99,16 +99,18 @@ pip install --upgrade pip >/dev/null
 
 echo "▶ Testing app..."
 
-pkill -f flask >/dev/null 2>&1 || true
+pkill -f "flask --app main" >/dev/null 2>&1 || true
 
-flask --app main run >/dev/null 2>&1 &
+nohup flask --app main run >/dev/null 2>&1 &
 
-PID=$!
-sleep 5
+FLASK_PID=$!
+
+sleep 6
 
 curl -4 -s http://127.0.0.1:5000 >/dev/null
 
-kill $PID
+kill "$FLASK_PID" >/dev/null 2>&1 || true
+
 
 # =================================================
 # MODIFY
@@ -116,7 +118,7 @@ kill $PID
 
 echo "▶ Updating code..."
 
-sed -i 's/Hello World!/Hello, Cruel World!/g' main.py
+sed -i 's/Hello World!/Hello, Cruel World!' main.py
 
 # =================================================
 # RETEST
@@ -124,16 +126,23 @@ sed -i 's/Hello World!/Hello, Cruel World!/g' main.py
 
 echo "▶ Retesting..."
 
-pkill -f flask >/dev/null 2>&1 || true
+# Kill any old Flask process
+pkill -f "flask --app main" >/dev/null 2>&1 || true
 
-flask --app main run >/dev/null 2>&1 &
+# Start Flask in background
+nohup flask --app main run >/dev/null 2>&1 &
 
-PID=$!
-sleep 5
+FLASK_PID=$!
 
+# Wait for startup
+sleep 6
+
+# Test endpoint
 curl -4 -s http://127.0.0.1:5000 >/dev/null
 
-kill $PID
+# Stop Flask
+kill "$FLASK_PID" >/dev/null 2>&1 || true
+
 
 # =================================================
 # CREATE APP
