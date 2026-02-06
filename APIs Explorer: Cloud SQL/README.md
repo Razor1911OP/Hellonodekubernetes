@@ -13,6 +13,8 @@ The [GSP423.sh](./GSP423.sh) script automates Cloud SQL instance creation, datab
 
 ### How to Run
 
+Navigate to the "APIs Explorer: Cloud SQL" directory and run:
+
 **Option 1: Direct Execution**
 ```bash
 ./GSP423.sh
@@ -21,11 +23,6 @@ The [GSP423.sh](./GSP423.sh) script automates Cloud SQL instance creation, datab
 **Option 2: Using Bash**
 ```bash
 bash GSP423.sh
-```
-
-**Option 3: With Bash (explicit path)**
-```bash
-bash ./GSP423.sh
 ```
 
 ### What the Script Does
