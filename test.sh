@@ -1,155 +1,230 @@
 #!/bin/bash
+set -euo pipefail
 
-# Define colors and formatting
+# ===============================
+# COLORS
+# ===============================
 BLUE=$'\033[0;94m'
 GREEN=$'\033[0;92m'
 YELLOW=$'\033[0;93m'
 RED=$'\033[0;91m'
-NC=$'\033[0m' # No Color
+NC=$'\033[0m'
 BOLD=$'\033[1m'
 
-# Header
+# ===============================
+# FUNCTIONS
+# ===============================
+
+log() {
+  echo "${BLUE}${BOLD}▶ $1${NC}"
+}
+
+success() {
+  echo "${GREEN}✔ $1${NC}"
+}
+
+error() {
+  echo "${RED}${BOLD}✖ $1${NC}"
+  exit 1
+}
+
+wait_for_pods() {
+  log "Waiting for pods to be ready..."
+  kubectl wait \
+    --for=condition=Ready \
+    pod \
+    --selector=app=hello-node \
+    --timeout=180s
+}
+
+wait_for_service_ip() {
+  log "Waiting for external IP..."
+
+  for i in {1..30}; do
+    IP=$(kubectl get svc hello-node \
+      -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+
+    if [[ -n "$IP" ]]; then
+      echo "$IP"
+      return
+    fi
+
+    sleep 10
+  done
+
+  error "Timed out waiting for external IP"
+}
+
+# ===============================
+# HEADER
+# ===============================
+
+clear
+
 echo
-echo "${BLUE}${BOLD}╔══════════════════════════════════════════╗${NC}"
-echo "${BLUE}${BOLD}║     Welcome to Dr Abhishek Cloud Tutorials      ║${NC}"
-echo "${BLUE}${BOLD}╚══════════════════════════════════════════╝${NC}"
+echo "${BLUE}${BOLD}╔════════════════════════════════════════════╗${NC}"
+echo "${BLUE}${BOLD}║     Dr Abhishek – GKE Automation Script     ║${NC}"
+echo "${BLUE}${BOLD}╚════════════════════════════════════════════╝${NC}"
 echo
 
-# Get project ID
-export PROJECT_ID=$(gcloud config get-value project)
-echo "${YELLOW}${BOLD}Project ID: ${BLUE}$PROJECT_ID${NC}"
-echo
+# ===============================
+# PROJECT CONFIG
+# ===============================
 
-# Step 1: Create Node.js application files
-echo "${YELLOW}${BOLD}Step 1: Creating application files${NC}"
+PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
+
+[[ -z "$PROJECT_ID" ]] && error "No GCP project set"
+
+ZONE=$(gcloud config get-value compute/zone 2>/dev/null)
+
+[[ -z "$ZONE" ]] && error "No compute zone set"
+
+REGION="${ZONE%-*}"
+
+REPO="my-docker-repo"
+IMAGE="hello-node"
+
+log "Project: $PROJECT_ID"
+log "Zone:    $ZONE"
+log "Region:  $REGION"
+
+# ===============================
+# STEP 1: APP FILES
+# ===============================
+
+log "Creating Node.js app..."
+
 cat > server.js <<EOF
 var http = require('http');
-var handleRequest = function(request, response) {
-  response.writeHead(200);
-  response.end("Hello World!");
-}
-var www = http.createServer(handleRequest);
-www.listen(8080);
+
+var handleRequest = function(req, res) {
+  res.writeHead(200);
+  res.end("Hello World!");
+};
+
+http.createServer(handleRequest).listen(8080);
 EOF
 
 cat > Dockerfile <<EOF
-FROM node:6.9.2
-EXPOSE 8080
+FROM node:18-alpine
+WORKDIR /app
 COPY server.js .
-CMD node server.js
+EXPOSE 8080
+CMD ["node","server.js"]
 EOF
 
-echo "${GREEN}Created server.js and Dockerfile${NC}"
-echo
+success "Application files created"
 
-# Step 2: Build Docker image
-echo "${YELLOW}${BOLD}Step 2: Building Docker image${NC}"
-docker build -t gcr.io/$PROJECT_ID/hello-node:v1 . || {
-    echo "${RED}${BOLD}Error building Docker image${NC}"
-    exit 1
-}
-echo "${GREEN}Docker image built successfully${NC}"
-echo
+# ===============================
+# STEP 2: ARTIFACT REGISTRY
+# ===============================
 
-# Step 3: Run container locally
-echo "${YELLOW}${BOLD}Step 3: Testing container locally${NC}"
-docker run -d -p 8080:8080 gcr.io/$PROJECT_ID/hello-node:v1 || {
-    echo "${RED}${BOLD}Error running container${NC}"
-    exit 1
-}
+log "Creating Artifact Registry..."
 
-echo "${GREEN}Local test:${NC}"
-curl -s http://localhost:8080
-echo
+gcloud artifacts repositories create "$REPO" \
+  --repository-format=docker \
+  --location="$REGION" \
+  --quiet || true
 
-ID=$(docker ps --format '{{.ID}}')
-docker stop $ID
-echo "${GREEN}Stopped test container${NC}"
-echo
+gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
 
-# Step 4: Push to Container Registry
-echo "${YELLOW}${BOLD}Step 4: Pushing to Container Registry${NC}"
-gcloud auth configure-docker --quiet
-docker push gcr.io/$PROJECT_ID/hello-node:v1 || {
-    echo "${RED}${BOLD}Error pushing to Container Registry${NC}"
-    exit 1
-}
-echo "${GREEN}Image pushed to gcr.io/$PROJECT_ID/hello-node:v1${NC}"
-echo
+IMAGE_URI="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/$IMAGE"
 
-echo "${YELLOW}${BOLD}Step 5: Creating GKE cluster${NC}"
+success "Registry ready"
 
-ZONE=$(gcloud config get-value compute/zone)
+# ===============================
+# STEP 3: BUILD IMAGE
+# ===============================
 
-if [ -z "$ZONE" ]; then
-  echo "${RED}No compute zone configured.${NC}"
-  exit 1
-fi
+log "Building Docker image..."
+
+docker build -t "$IMAGE_URI:v1" .
+
+success "Image built"
+
+# ===============================
+# STEP 4: PUSH IMAGE
+# ===============================
+
+log "Pushing image..."
+
+docker push "$IMAGE_URI:v1"
+
+success "Image pushed"
+
+# ===============================
+# STEP 5: CREATE CLUSTER
+# ===============================
+
+log "Creating GKE cluster..."
 
 gcloud container clusters create hello-world \
   --zone="$ZONE" \
   --num-nodes=2 \
-  --machine-type=e2-standard-2 || {
-    echo "${RED}${BOLD}Error creating cluster${NC}"
-    exit 1
-}
+  --machine-type=e2-medium \
+  --quiet || true
 
-echo "${GREEN}Cluster created successfully${NC}"
+gcloud container clusters get-credentials hello-world \
+  --zone="$ZONE" \
+  --quiet
+
+success "Cluster ready"
+
+# ===============================
+# STEP 6: DEPLOY
+# ===============================
+
+log "Deploying application..."
+
+kubectl create deployment hello-node \
+  --image="$IMAGE_URI:v1" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl set image deployment/hello-node \
+  hello-node="$IMAGE_URI:v1"
+
+success "Deployment created"
+
+# ===============================
+# STEP 7: EXPOSE
+# ===============================
+
+log "Creating service..."
+
+kubectl expose deployment hello-node \
+  --type=LoadBalancer \
+  --port=8080 \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+success "Service exposed"
+
+# ===============================
+# STEP 8: SCALE
+# ===============================
+
+log "Scaling deployment..."
+
+kubectl scale deployment hello-node --replicas=4
+
+success "Scaled to 4 replicas"
+
+# ===============================
+# STEP 9: WAIT
+# ===============================
+
+wait_for_pods
+
+SERVICE_IP=$(wait_for_service_ip)
+
+# ===============================
+# FINAL
+# ===============================
+
 echo
-
-# Step 6: Deploy to Kubernetes
-echo "${YELLOW}${BOLD}Step 6: Deploying to Kubernetes${NC}"
-kubectl create deployment hello-node --image=gcr.io/$PROJECT_ID/hello-node:v1 || {
-    echo "${RED}${BOLD}Error creating deployment${NC}"
-    exit 1
-}
-
-echo "${GREEN}Deployment status:${NC}"
-sleep 5
-kubectl get deployments
+echo "${GREEN}${BOLD}🎉 Deployment Successful!${NC}"
 echo
-
-echo "${GREEN}Pod status:${NC}"
-sleep 5
-kubectl get pods
+echo "${YELLOW}Application URL:${NC}"
+echo "${BLUE}http://$SERVICE_IP:8080${NC}"
 echo
-
-echo "${GREEN}Cluster info:${NC}"
-kubectl cluster-info
+echo "${GREEN}YouTube: https://www.youtube.com/@drabhishek.5460${NC}"
 echo
-
-# Step 7: Expose service
-echo "${YELLOW}${BOLD}Step 7: Exposing service${NC}"
-kubectl expose deployment hello-node --type="LoadBalancer" --port=8080 || {
-    echo "${RED}${BOLD}Error exposing service${NC}"
-    exit 1
-}
-
-echo "${GREEN}Service status:${NC}"
-sleep 7
-kubectl get services
-echo
-
-# Step 8: Scale deployment
-echo "${YELLOW}${BOLD}Step 8: Scaling deployment${NC}"
-kubectl scale deployment hello-node --replicas=4 || {
-    echo "${RED}${BOLD}Error scaling deployment${NC}"
-    exit 1
-}
-
-echo "${GREEN}Scaled deployment status:${NC}"
-sleep 5
-kubectl get deployment
-echo
-
-echo "${GREEN}Pod status after scaling:${NC}"
-sleep 7
-kubectl get pods
-echo
-
-# Final output
-SERVICE_IP=$(kubectl get service hello-node -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "${GREEN}${BOLD}Deployment successful!${NC}"
-echo "${YELLOW}Access your application at: ${BLUE}http://$SERVICE_IP:8080${NC}"
-echo
-echo "${GREEN}Subscribe for more tutorials: ${BLUE}https://www.youtube.com/@drabhishek.5460${NC}"
