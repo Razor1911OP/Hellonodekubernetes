@@ -29,7 +29,6 @@ GREEN=$(tput setaf 2)
 YELLOW=$(tput setaf 3)
 BLUE=$(tput setaf 4)
 CYAN=$(tput setaf 6)
-RED=$(tput setaf 1)
 BOLD=$(tput bold)
 RESET=$(tput sgr0)
 
@@ -40,52 +39,27 @@ RESET=$(tput sgr0)
 PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
 
 if [[ -z "$PROJECT_ID" ]]; then
-  echo "${RED}❌ No active GCP project found${RESET}"
+  echo "❌ No active GCP project found"
   exit 1
 fi
 
 # =================================================
-# FETCH VALID REGIONS
+# ASK REGION (NO VALIDATION)
 # =================================================
 
-echo "${YELLOW}▶ Fetching valid App Engine regions...${RESET}"
+echo
+echo "${CYAN}${BOLD}Select App Engine Region${RESET}"
+echo
+echo "Examples: us-central, us-east1, europe-west, asia-east1"
+echo
 
-VALID_REGIONS=$(gcloud app regions list \
-  --format="value(locationId)" 2>/dev/null)
+read -p "Enter region (default: us-central): " REGION
 
-if [[ -z "$VALID_REGIONS" ]]; then
-  echo "${RED}❌ Unable to fetch regions${RESET}"
-  exit 1
-fi
+REGION=${REGION:-us-central}
 
-# =================================================
-# ASK + VERIFY REGION
-# =================================================
-
-while true; do
-
-  echo
-  echo "${CYAN}${BOLD}Available App Engine Regions:${RESET}"
-  echo "$VALID_REGIONS" | tr ' ' '\n' | column
-  echo
-
-  read -p "Enter region (default: us-central): " REGION
-
-  REGION=${REGION:-us-central}
-
-  if echo "$VALID_REGIONS" | grep -qx "$REGION"; then
-    echo
-    echo "${GREEN}✓ Valid region selected: $REGION${RESET}"
-    echo
-    break
-  else
-    echo
-    echo "${RED}❌ Invalid region: $REGION${RESET}"
-    echo "${YELLOW}Please choose from the list above.${RESET}"
-    echo
-  fi
-
-done
+echo
+echo "${GREEN}✓ Using region: $REGION${RESET}"
+echo
 
 # =================================================
 # CONFIG
@@ -101,7 +75,7 @@ VENV="myenv"
 clear
 echo
 echo "${CYAN}${BOLD}============================================${RESET}"
-echo "${CYAN}${BOLD}   APP ENGINE PYTHON LAB (VERIFIED MODE)   ${RESET}"
+echo "${CYAN}${BOLD}   APP ENGINE PYTHON LAB (FAST MODE)        ${RESET}"
 echo "${CYAN}${BOLD}============================================${RESET}"
 echo
 echo "${BLUE}Project: $PROJECT_ID${RESET}"
@@ -190,49 +164,4 @@ flask --app main run >/dev/null 2>&1 &
 PID=$!
 sleep 5
 
-curl -4 -s http://127.0.0.1:5000 >/dev/null
-
-kill $PID
-
-echo "${GREEN}✓ Retest successful${RESET}"
-
-# =================================================
-# CREATE APP
-# =================================================
-
-echo "${YELLOW}▶ Creating App Engine app (if needed)...${RESET}"
-
-gcloud app create --region="$REGION" --quiet || true
-
-# =================================================
-# DEPLOY
-# =================================================
-
-echo "${YELLOW}▶ Deploying application...${RESET}"
-
-gcloud app deploy --quiet || {
-  echo "${YELLOW}Retrying deployment...${RESET}"
-  sleep 20
-  gcloud app deploy --quiet
-}
-
-echo "${GREEN}✓ Deployment complete${RESET}"
-
-# =================================================
-# GET URL
-# =================================================
-
-URL=$(gcloud app browse --no-launch-browser 2>/dev/null | grep https || true)
-
-# =================================================
-# DONE
-# =================================================
-
-echo
-echo "${GREEN}${BOLD}============================================${RESET}"
-echo "${GREEN}${BOLD}   DEPLOYMENT SUCCESSFUL!                  ${RESET}"
-echo "${GREEN}${BOLD}============================================${RESET}"
-echo
-echo "${BLUE}Application URL:${RESET}"
-echo "${CYAN}$URL${RESET}"
-echo
+curl -4 -s http://127.0.0.1:5000 >
