@@ -1,95 +1,100 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-# ================= COLORS =================
-RED=$(tput setaf 1)
-GREEN=$(tput setaf 2)
-YELLOW=$(tput setaf 3)
-BLUE=$(tput setaf 4)
-CYAN=$(tput setaf 6)
-BOLD=$(tput bold)
-RESET=$(tput sgr0)
+# ==============================
+# CONFIG
+# ==============================
 
-# ================= CONFIG =================
 PROJECT_ID=$(gcloud config get-value project)
-INSTANCE="my-instance"
-DB="mysql-db"
-TABLE="info"
 REGION="us-central1"
+INSTANCE="my-instance"
+DB_NAME="mysql-db"
+TABLE="info"
+BUCKET="${PROJECT_ID}-sql-bucket-$(date +%s)"
+CSV_FILE="employee_info.csv"
+
 API="https://sqladmin.googleapis.com/sql/v1beta4"
-BUCKET="${PROJECT_ID}-sql-$(date +%s)"
-CSV="employee_info.csv"
 
-# ================= HEADER =================
-clear
-echo
-echo "${CYAN}${BOLD}============================================${RESET}"
-echo "${CYAN}${BOLD}   DR. ABHISHEK CLOUD SQL FAST LAB SCRIPT    ${RESET}"
-echo "${CYAN}${BOLD}============================================${RESET}"
-echo
+echo "Project: $PROJECT_ID"
+echo "Bucket:  $BUCKET"
 
-echo "${BLUE}Project: $PROJECT_ID${RESET}"
-echo "${BLUE}Region:  $REGION${RESET}"
-echo
+# ==============================
+# ENABLE API
+# ==============================
 
-# ================= ENABLE API =================
-echo "${YELLOW}▶ Enabling SQL API...${RESET}"
-gcloud services enable sqladmin.googleapis.com --quiet
+echo "Enabling Cloud SQL API..."
+gcloud services enable sqladmin.googleapis.com
 
-# ================= TOKEN =================
+# ==============================
+# AUTH TOKEN
+# ==============================
+
 TOKEN=$(gcloud auth print-access-token)
 
-# ================= CREATE INSTANCE =================
-echo "${YELLOW}▶ Creating instance...${RESET}"
+# ==============================
+# TASK 1: CREATE INSTANCE
+# ==============================
+
+echo "Creating Cloud SQL instance..."
 
 curl -s -X POST \
- -H "Authorization: Bearer $TOKEN" \
- -H "Content-Type: application/json" \
- "${API}/projects/$PROJECT_ID/instances" \
- -d "{
-  \"name\":\"$INSTANCE\",
-  \"region\":\"$REGION\",
-  \"databaseVersion\":\"MYSQL_5_7\",
-  \"settings\":{\"tier\":\"db-n1-standard-1\"}
- }" >/dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "${API}/projects/${PROJECT_ID}/instances" \
+  -d "{
+    \"name\": \"${INSTANCE}\",
+    \"region\": \"${REGION}\",
+    \"databaseVersion\": \"MYSQL_5_7\",
+    \"settings\": {
+      \"tier\": \"db-n1-standard-1\"
+    }
+  }" > /dev/null
 
-echo "${BLUE}Waiting for instance...${RESET}"
+
+echo "Waiting for instance..."
 
 until gcloud sql instances describe $INSTANCE &>/dev/null
 do
- sleep 8
+  sleep 10
 done
 
-echo "${GREEN}✓ Instance ready${RESET}"
+# ==============================
+# TASK 2: CREATE DATABASE
+# ==============================
 
-# ================= CREATE DB =================
-echo "${YELLOW}▶ Creating database...${RESET}"
+echo "Creating database..."
 
 curl -s -X POST \
- -H "Authorization: Bearer $TOKEN" \
- -H "Content-Type: application/json" \
- "${API}/projects/$PROJECT_ID/instances/$INSTANCE/databases" \
- -d "{\"name\":\"$DB\"}" >/dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "${API}/projects/${PROJECT_ID}/instances/${INSTANCE}/databases" \
+  -d "{
+    \"name\": \"${DB_NAME}\"
+  }" > /dev/null
 
-echo "${GREEN}✓ Database created${RESET}"
+# ==============================
+# TASK 3: CREATE TABLE
+# ==============================
 
-# ================= CREATE TABLE =================
-echo "${YELLOW}▶ Creating table...${RESET}"
+echo "Creating table..."
 
 gcloud sql connect $INSTANCE --user=root <<EOF
-USE $DB;
-CREATE TABLE info(
- name VARCHAR(255),
- age INT,
- occupation VARCHAR(255)
+USE ${DB_NAME};
+CREATE TABLE info (
+  name VARCHAR(255),
+  age INT,
+  occupation VARCHAR(255)
 );
 EXIT
 EOF
 
-# ================= CREATE CSV =================
-echo "${YELLOW}▶ Creating CSV...${RESET}"
+# ==============================
+# CREATE CSV
+# ==============================
 
-cat > $CSV <<EOF
+echo "Creating CSV..."
+
+cat > $CSV_FILE <<EOF
 "Sean",23,"Content Creator"
 "Emily",34,"Cloud Engineer"
 "Rocky",40,"Event coordinator"
@@ -98,65 +103,104 @@ cat > $CSV <<EOF
 "Jennifer",32,"Web Developer"
 EOF
 
-# ================= BUCKET =================
-echo "${YELLOW}▶ Creating bucket...${RESET}"
 
-gsutil mb -l $REGION gs://$BUCKET >/dev/null
+# ==============================
+# CREATE BUCKET
+# ==============================
 
-gsutil cp $CSV gs://$BUCKET/ >/dev/null
+echo "Creating bucket..."
 
-# ================= PERMISSIONS =================
-echo "${YELLOW}▶ Granting permissions...${RESET}"
+gsutil mb -l $REGION gs://$BUCKET
 
-SA=$(gcloud sql instances describe $INSTANCE \
- --format="value(serviceAccountEmailAddress)")
+# ==============================
+# UPLOAD CSV
+# ==============================
+
+echo "Uploading CSV..."
+
+gsutil cp $CSV_FILE gs://$BUCKET/
+
+# ==============================
+# GRANT PERMISSIONS
+# ==============================
+
+echo "Granting Storage Admin..."
+
+SERVICE_ACCOUNT=$(gcloud sql instances describe $INSTANCE \
+  --format="value(serviceAccountEmailAddress)")
 
 gsutil iam ch \
- serviceAccount:$SA:roles/storage.admin \
- gs://$BUCKET >/dev/null
+  serviceAccount:$SERVICE_ACCOUNT:roles/storage.admin \
+  gs://$BUCKET
 
-# ================= IMPORT =================
-echo "${YELLOW}▶ Importing CSV...${RESET}"
+
+# ==============================
+# TASK 4: IMPORT CSV
+# ==============================
+
+echo "Importing CSV..."
 
 curl -s -X POST \
- -H "Authorization: Bearer $TOKEN" \
- -H "Content-Type: application/json" \
- "${API}/projects/$PROJECT_ID/instances/$INSTANCE/import" \
- -d "{
-  \"importContext\":{
-   \"database\":\"$DB\",
-   \"uri\":\"gs://$BUCKET/$CSV\",
-   \"fileType\":\"CSV\",
-   \"csvImportOptions\":{\"table\":\"$TABLE\"}
-  }
- }" >/dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  "${API}/projects/${PROJECT_ID}/instances/${INSTANCE}/import" \
+  -d "{
+    \"importContext\": {
+      \"database\": \"${DB_NAME}\",
+      \"uri\": \"gs://${BUCKET}/${CSV_FILE}\",
+      \"fileType\": \"CSV\",
+      \"csvImportOptions\": {
+        \"table\": \"${TABLE}\"
+      }
+    }
+  }" > /dev/null
 
-sleep 30
 
-# ================= VERIFY =================
-echo "${YELLOW}▶ Verifying data...${RESET}"
+echo "Waiting for import..."
+sleep 40
+
+
+# ==============================
+# TASK 5: VERIFY DATA
+# ==============================
+
+echo "Verifying table..."
 
 gcloud sql connect $INSTANCE --user=root <<EOF
-USE $DB;
+USE ${DB_NAME};
 SELECT * FROM info;
 EXIT
 EOF
 
-# ================= DELETE DB =================
-echo "${YELLOW}▶ Deleting database...${RESET}"
+
+# ==============================
+# TASK 6: DELETE DATABASE
+# ==============================
+
+echo "Deleting database..."
 
 curl -s -X DELETE \
- -H "Authorization: Bearer $TOKEN" \
- "${API}/projects/$PROJECT_ID/instances/$INSTANCE/databases/$DB" \
- >/dev/null
+  -H "Authorization: Bearer $TOKEN" \
+  "${API}/projects/${PROJECT_ID}/instances/${INSTANCE}/databases/${DB_NAME}" \
+  > /dev/null
 
-# ================= CLEAN =================
-gsutil rm -r gs://$BUCKET >/dev/null
-rm -f $CSV
 
-# ================= DONE =================
+# ==============================
+# CLEANUP
+# ==============================
+
+echo "Cleaning up..."
+
+gsutil rm -r gs://$BUCKET
+rm -f $CSV_FILE
+
+
+# ==============================
+# DONE
+# ==============================
+
 echo
-echo "${GREEN}${BOLD}============================================${RESET}"
-echo "${GREEN}${BOLD}   ALL TASKS COMPLETED SUCCESSFULLY!        ${RESET}"
-echo "${GREEN}${BOLD}============================================${RESET}"
+echo "===================================="
+echo " All Tasks Completed Successfully! "
+echo "===================================="
 echo
