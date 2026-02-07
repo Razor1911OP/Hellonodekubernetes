@@ -16,6 +16,11 @@ curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/
 sudo chmod +x python.sh
 ./python.sh
 ```
+```
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP102.sh
+sudo chmod +x GSP102.sh
+./GSP102.sh
+```
 
 ## Running the Test Script
 
