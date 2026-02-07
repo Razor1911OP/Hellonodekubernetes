@@ -1,82 +1,55 @@
 #!/bin/bash
 set -e
 
-# ================= COLORS =================
+### COLORS ###
 GREEN="\033[0;32m"
-RED="\033[0;31m"
 BLUE="\033[0;34m"
+RED="\033[0;31m"
 YELLOW="\033[1;33m"
-CYAN="\033[0;36m"
-RESET="\033[0m"
-BOLD="\033[1m"
+NC="\033[0m"
 
-# ================= FUNCTIONS =================
-
+### RETRY FUNCTION ###
 retry() {
-  local n=0
-  until [ $n -ge 5 ]; do
-    "$@" && break
-    n=$((n+1))
-    echo -e "${YELLOW}Retry $n/5...${RESET}"
-    sleep 6
-  done
+  local n=1
+  local max=5
+  local delay=20
 
-  if [ $n -ge 5 ]; then
-    echo -e "${RED}Command failed.${RESET}"
-    exit 1
-  fi
+  while true; do
+    "$@" && break || {
+      if [[ $n -lt $max ]]; then
+        ((n++))
+        echo -e "${YELLOW}Retry $n/$max...${NC}"
+        sleep $delay
+      else
+        echo -e "${RED}Command failed after $max attempts${NC}"
+        exit 1
+      fi
+    }
+  done
 }
 
-# ================= HEADER =================
-
-clear
-echo -e "${CYAN}${BOLD}"
-echo "=============================================="
-echo "   🚀 GSP041 Internal Load Balancer Automation"
-echo "=============================================="
-echo -e "${RESET}"
-
-# ================= ENV =================
-
+### PROJECT ###
 PROJECT_ID=$(gcloud config get-value project)
-ACCOUNT=$(gcloud config get-value account)
+echo -e "${GREEN}Project: $PROJECT_ID${NC}"
 
-if [[ -z "$PROJECT_ID" || -z "$ACCOUNT" ]]; then
-  echo -e "${RED}❌ gcloud not configured${RESET}"
-  exit 1
-fi
-
-echo -e "${GREEN}Project: $PROJECT_ID${RESET}"
-echo -e "${GREEN}User:    $ACCOUNT${RESET}"
-
-# ================= REGION / ZONE =================
-
-echo
-read -p "Enter REGION (e.g. us-central1): " REGION
-read -p "Enter ZONE   (e.g. us-central1-a): " ZONE
+### REGION / ZONE ###
+read -p "Enter REGION (ex: us-central1): " REGION
+read -p "Enter ZONE (ex: us-central1-a): " ZONE
 
 gcloud config set compute/region "$REGION"
 gcloud config set compute/zone "$ZONE"
 
-# ================= VENV (REQUIRED STEP) =================
+### ENABLE API ###
+echo -e "${BLUE}Enabling APIs...${NC}"
+retry gcloud services enable compute.googleapis.com
 
-echo -e "${BLUE}Installing virtualenv...${RESET}"
-retry sudo apt-get update
-retry sudo apt-get install -y virtualenv
+################################
+# BACKEND SCRIPT
+################################
 
-python3 -m venv venv
-source venv/bin/activate
+echo -e "${BLUE}Creating backend startup script...${NC}"
 
-# ================= ENABLE API =================
-
-echo -e "${BLUE}Enabling Gemini API...${RESET}"
-retry gcloud services enable cloudaicompanion.googleapis.com
-
-# ================= BACKEND SCRIPT =================
-
-echo -e "${BLUE}Creating backend script...${RESET}"
-
-cat > backend.sh <<'EOF'
+cat > ~/backend.sh << 'EOF'
 sudo chmod -R 777 /usr/local/sbin/
 sudo cat << PYEOF > /usr/local/sbin/serveprimes.py
 import http.server
@@ -88,7 +61,7 @@ class myHandler(http.server.BaseHTTPRequestHandler):
     s.send_response(200)
     s.send_header("Content-type","text/plain")
     s.end_headers()
-    s.wfile.write(bytes(str(is_prime(int(s.path[1:]))),'utf-8'))
+    s.wfile.write(bytes(str(is_prime(int(s.path[1:]))),"utf-8"))
 
 http.server.HTTPServer(("",80),myHandler).serve_forever()
 PYEOF
@@ -96,101 +69,178 @@ PYEOF
 nohup python3 /usr/local/sbin/serveprimes.py >/dev/null 2>&1 &
 EOF
 
-chmod +x backend.sh
+################################
+# INSTANCE TEMPLATE
+################################
 
-# ================= TEMPLATE =================
+if ! gcloud compute instance-templates describe primecalc &>/dev/null; then
+  echo -e "${BLUE}Creating instance template...${NC}"
 
-echo -e "${BLUE}Creating instance template...${RESET}"
+  retry gcloud compute instance-templates create primecalc \
+    --metadata-from-file startup-script=backend.sh \
+    --no-address \
+    --tags backend \
+    --machine-type=e2-medium
+else
+  echo -e "${GREEN}Instance template exists. Skipping.${NC}"
+fi
 
-retry gcloud compute instance-templates create primecalc \
-  --metadata-from-file startup-script=backend.sh \
-  --no-address \
-  --tags backend \
-  --machine-type=e2-medium
+################################
+# FIREWALL BACKEND
+################################
 
-# ================= FIREWALL =================
+if ! gcloud compute firewall-rules describe http &>/dev/null; then
+  echo -e "${BLUE}Creating firewall rule (backend)...${NC}"
 
-echo -e "${BLUE}Creating firewall rule...${RESET}"
+  retry gcloud compute firewall-rules create http \
+    --network default \
+    --allow tcp:80 \
+    --source-ranges 0.0.0.0/0 \
+    --target-tags backend
+else
+  echo -e "${GREEN}Firewall rule exists. Skipping.${NC}"
+fi
 
-gcloud compute firewall-rules delete http-backend -q 2>/dev/null || true
+################################
+# MIG
+################################
 
-retry gcloud compute firewall-rules create http-backend \
-  --network default \
-  --allow tcp:80 \
-  --source-ranges 10.0.0.0/8 \
-  --target-tags backend
+if ! gcloud compute instance-groups managed describe backend \
+  --zone=$ZONE &>/dev/null; then
 
-# ================= MIG =================
+  echo -e "${BLUE}Creating instance group...${NC}"
 
-echo -e "${BLUE}Creating managed instance group...${RESET}"
+  retry gcloud compute instance-groups managed create backend \
+    --size 3 \
+    --template primecalc \
+    --zone $ZONE
+else
+  echo -e "${GREEN}Instance group exists. Skipping.${NC}"
+fi
 
-retry gcloud compute instance-groups managed create backend \
-  --size 3 \
-  --template primecalc \
-  --zone "$ZONE"
+################################
+# HEALTH CHECK
+################################
 
-# ================= HEALTH CHECK =================
+if ! gcloud compute health-checks describe ilb-health &>/dev/null; then
+  echo -e "${BLUE}Creating health check...${NC}"
 
-echo -e "${BLUE}Creating health check...${RESET}"
+  retry gcloud compute health-checks create http ilb-health \
+    --request-path /2
+else
+  echo -e "${GREEN}Health check exists. Skipping.${NC}"
+fi
 
-retry gcloud compute health-checks create http ilb-health \
-  --request-path /2
+################################
+# BACKEND SERVICE
+################################
 
-# ================= BACKEND SERVICE =================
+if ! gcloud compute backend-services describe prime-service \
+  --region=$REGION &>/dev/null; then
 
-echo -e "${BLUE}Creating backend service...${RESET}"
+  echo -e "${BLUE}Creating backend service...${NC}"
 
-retry gcloud compute backend-services create prime-service \
-  --load-balancing-scheme internal \
-  --region "$REGION" \
-  --protocol tcp \
-  --health-checks ilb-health
+  retry gcloud compute backend-services create prime-service \
+    --load-balancing-scheme internal \
+    --region=$REGION \
+    --protocol tcp \
+    --health-checks ilb-health
+else
+  echo -e "${GREEN}Backend service exists. Skipping.${NC}"
+fi
 
-retry gcloud compute backend-services add-backend prime-service \
-  --instance-group backend \
-  --instance-group-zone "$ZONE" \
-  --region "$REGION"
+################################
+# ADD BACKEND
+################################
 
-# ================= INTERNAL IP =================
+if ! gcloud compute backend-services get-health prime-service \
+  --region=$REGION &>/dev/null; then
 
-echo -e "${BLUE}Reserving internal IP...${RESET}"
+  echo -e "${BLUE}Attaching instance group...${NC}"
 
-retry gcloud compute addresses create ilb-ip \
-  --region "$REGION" \
-  --subnet default \
-  --addresses 10.128.0.50
+  retry gcloud compute backend-services add-backend prime-service \
+    --instance-group backend \
+    --instance-group-zone $ZONE \
+    --region=$REGION
+fi
 
-ILB_IP=$(gcloud compute addresses describe ilb-ip \
-  --region "$REGION" \
-  --format="value(address)")
+################################
+# FORWARDING RULE
+################################
 
-# ================= FORWARDING RULE =================
+if ! gcloud compute forwarding-rules describe prime-lb \
+  --region=$REGION &>/dev/null; then
 
-echo -e "${BLUE}Creating forwarding rule...${RESET}"
+  echo -e "${BLUE}Creating forwarding rule...${NC}"
 
-retry gcloud compute forwarding-rules create prime-lb \
-  --load-balancing-scheme internal \
-  --ports 80 \
-  --network default \
-  --region "$REGION" \
-  --address "$ILB_IP" \
-  --backend-service prime-service
+  retry gcloud compute forwarding-rules create prime-lb \
+    --load-balancing-scheme internal \
+    --ports 80 \
+    --network default \
+    --region=$REGION \
+    --backend-service prime-service
+else
+  echo -e "${GREEN}Forwarding rule exists. Skipping.${NC}"
+fi
 
-# ================= FRONTEND SCRIPT =================
+################################
+# GET ILB IP
+################################
 
-echo -e "${BLUE}Creating frontend script...${RESET}"
+ILB_IP=$(gcloud compute forwarding-rules describe prime-lb \
+  --region=$REGION \
+  --format="get(IPAddress)")
 
-cat > frontend.sh <<EOF
+echo -e "${GREEN}Internal LB IP: $ILB_IP${NC}"
+
+################################
+# TEST VM
+################################
+
+if ! gcloud compute instances describe testinstance \
+  --zone=$ZONE &>/dev/null; then
+
+  echo -e "${BLUE}Creating test VM...${NC}"
+
+  retry gcloud compute instances create testinstance \
+    --machine-type=e2-standard-2 \
+    --zone=$ZONE
+else
+  echo -e "${GREEN}Test VM exists. Skipping.${NC}"
+fi
+
+################################
+# MANUAL CHECKPOINT
+################################
+
+echo
+echo -e "${YELLOW}================ MANUAL STEP ================${NC}"
+echo "SSH and test:"
+echo "gcloud compute ssh testinstance --zone=$ZONE"
+echo "curl $ILB_IP/2"
+echo "curl $ILB_IP/4"
+echo "curl $ILB_IP/5"
+echo "exit"
+echo "Then delete VM:"
+echo "gcloud compute instances delete testinstance --zone=$ZONE"
+echo
+read -p "Complete this and press ENTER..."
+
+################################
+# FRONTEND SCRIPT
+################################
+
+cat > ~/frontend.sh << EOF
 sudo chmod -R 777 /usr/local/sbin/
 sudo cat << PYEOF > /usr/local/sbin/getprimes.py
 import urllib.request
 from multiprocessing.dummy import Pool as ThreadPool
 import http.server
 
-PREFIX="http://${ILB_IP}/"
+PREFIX="http://$ILB_IP/"
 
-def get_url(n):
-  return urllib.request.urlopen(PREFIX+str(n)).read().decode('utf-8')
+def get_url(number):
+    return urllib.request.urlopen(PREFIX+str(number)).read().decode('utf-8')
 
 class myHandler(http.server.BaseHTTPRequestHandler):
   def do_GET(s):
@@ -202,10 +252,13 @@ class myHandler(http.server.BaseHTTPRequestHandler):
     pool=ThreadPool(10)
     results=pool.map(get_url,range(i,i+100))
     for x in range(100):
-      if not x%10: s.wfile.write("<tr>".encode())
-      color="#00ff00" if results[x]=="True" else "#ff0000"
-      s.wfile.write(f"<td bgcolor='{color}'>{x+i}</td>".encode())
-      if not (x+1)%10: s.wfile.write("</tr>".encode())
+      if not (x%10): s.wfile.write("<tr>".encode())
+      if results[x]=="True":
+        s.wfile.write("<td bgcolor='#00ff00'>".encode())
+      else:
+        s.wfile.write("<td bgcolor='#ff0000'>".encode())
+      s.wfile.write(str(x+i).encode()+"</td>".encode())
+      if not ((x+1)%10): s.wfile.write("</tr>".encode())
     s.wfile.write("</table></body></html>".encode())
 
 http.server.HTTPServer(("",80),myHandler).serve_forever()
@@ -214,39 +267,53 @@ PYEOF
 nohup python3 /usr/local/sbin/getprimes.py >/dev/null 2>&1 &
 EOF
 
-chmod +x frontend.sh
+################################
+# FRONTEND VM
+################################
 
-# ================= FRONTEND VM =================
+if ! gcloud compute instances describe frontend \
+  --zone=$ZONE &>/dev/null; then
 
-echo -e "${BLUE}Creating frontend VM...${RESET}"
+  echo -e "${BLUE}Creating frontend VM...${NC}"
 
-retry gcloud compute instances create frontend \
-  --zone "$ZONE" \
-  --metadata-from-file startup-script=frontend.sh \
-  --tags frontend \
-  --machine-type e2-standard-2
+  retry gcloud compute instances create frontend \
+    --zone=$ZONE \
+    --metadata-from-file startup-script=frontend.sh \
+    --tags frontend \
+    --machine-type=e2-standard-2
+else
+  echo -e "${GREEN}Frontend exists. Skipping.${NC}"
+fi
 
-# ================= FRONTEND FIREWALL =================
+################################
+# FRONTEND FIREWALL
+################################
 
-echo -e "${BLUE}Opening frontend firewall...${RESET}"
+if ! gcloud compute firewall-rules describe http2 &>/dev/null; then
+  echo -e "${BLUE}Creating frontend firewall...${NC}"
 
-gcloud compute firewall-rules delete http-frontend -q 2>/dev/null || true
+  retry gcloud compute firewall-rules create http2 \
+    --network default \
+    --allow tcp:80 \
+    --source-ranges 0.0.0.0/0 \
+    --target-tags frontend
+fi
 
-retry gcloud compute firewall-rules create http-frontend \
-  --network default \
-  --allow tcp:80 \
-  --source-ranges 0.0.0.0/0 \
-  --target-tags frontend
+################################
+# FINAL
+################################
 
-# ================= DONE =================
+FRONT_IP=$(gcloud compute instances describe frontend \
+--zone=$ZONE \
+--format="get(networkInterfaces[0].accessConfigs[0].natIP)")
 
 echo
-echo -e "${GREEN}${BOLD}============================================${RESET}"
-echo -e "${GREEN}${BOLD}✅ GSP041 INFRASTRUCTURE READY FOR SCORING${RESET}"
-echo -e "${GREEN}${BOLD}============================================${RESET}"
+echo -e "${GREEN}==================================${NC}"
+echo -e "${GREEN}LAB COMPLETED${NC}"
+echo -e "${GREEN}==================================${NC}"
 echo
-
-echo -e "${BLUE}Now click Check My Progress in the lab.${RESET}"
-echo -e "${BLUE}Lab Link:${RESET}"
-echo "https://www.cloudskillsboost.google/focuses/1006"
+echo "Frontend URL:"
+echo "http://$FRONT_IP"
+echo
+echo "Click Check My Progress in lab."
 echo
