@@ -26,7 +26,11 @@ curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/
 sudo chmod +x GSP1021.sh
 ./GSP1021.sh
 ```
-
+```
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP041.sh
+sudo chmod +x GSP041.sh
+./GSP041.sh
+```
 
 ## Running the Test Script
 
