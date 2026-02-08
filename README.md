@@ -48,6 +48,24 @@ curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/
 sudo chmod +x GSP1051.sh
 ./GSP1051.sh
 ```
+
+```
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP1078_1.sh
+sudo chmod +x GSP1078_1.sh
+./GSP1078_1.sh
+```
+
+```
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP1078_2.sh
+sudo chmod +x GSP1078_2.sh
+./GSP1078_2.sh
+```
+
+```
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP1078_Master.sh
+sudo chmod +x GSP1078_Master.sh
+./GSP1078_Master.sh
+```
 ## Running the Test Script
 
 If you already have the script, you can execute it directly:
