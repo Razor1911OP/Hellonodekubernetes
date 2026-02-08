@@ -1,255 +1,267 @@
 #!/bin/bash
 set -e
 
-############################
-# COLORS
-############################
-GREEN="\033[0;32m"
-YELLOW="\033[1;33m"
-RED="\033[0;31m"
-BLUE="\033[0;34m"
-RESET="\033[0m"
-BOLD="\033[1m"
+########################################
+# CONFIG
+########################################
 
-############################
+MAX_RETRIES=5
+BACKEND_SERVICE="omegatrade-backend"
+FRONTEND_SERVICE="omegatrade-frontend"
+INSTANCE="omegatrade-instance"
+DATABASE="omegatrade-db"
+
+########################################
+# COLORS
+########################################
+
+GREEN="\e[32m"
+YELLOW="\e[33m"
+RED="\e[31m"
+BLUE="\e[34m"
+RESET="\e[0m"
+BOLD="\e[1m"
+
+########################################
 # FUNCTIONS
-############################
+########################################
 
 retry() {
   local n=1
-  local max=5
-  local delay=10
-
-  while true; do
-    "$@" && break || {
-      if [[ $n -lt $max ]]; then
-        echo -e "${YELLOW}Retry $n/$max...${RESET}"
-        ((n++))
-        sleep $delay
-      else
-        echo -e "${RED}Command failed after $max attempts.${RESET}"
-        exit 1
-      fi
-    }
+  until [ $n -gt $MAX_RETRIES ]; do
+    "$@" && break
+    echo -e "${YELLOW}Retry $n/$MAX_RETRIES...${RESET}"
+    sleep 10
+    ((n++))
   done
+
+  if [ $n -gt $MAX_RETRIES ]; then
+    echo -e "${RED}Command failed permanently${RESET}"
+    exit 1
+  fi
 }
 
-pause() {
+checkpoint() {
   echo
-  read -p "Press ENTER to continue..." _
+  echo -e "${BLUE}${BOLD}================================================${RESET}"
+  echo -e "${GREEN}${BOLD}CHECKPOINT:${RESET} $1"
+  echo -e "${YELLOW}👉 Click: Check My Progress in Lab UI${RESET}"
+  echo -e "${BLUE}${BOLD}================================================${RESET}"
+  echo
 }
 
-############################
-# INIT
-############################
+pause_manual() {
+  echo
+  echo -e "${YELLOW}${BOLD}MANUAL STEP REQUIRED:${RESET}"
+  echo "$1"
+  read -p "Press ENTER after completing..."
+}
 
-clear
-echo -e "${BLUE}${BOLD}=== GSP1051 : OmegaTrade Automation ===${RESET}"
+########################################
+# PROJECT SETUP
+########################################
+
+echo -e "${BLUE}${BOLD}Initializing Environment...${RESET}"
 
 PROJECT_ID=$(gcloud config get-value project)
 ACCOUNT=$(gcloud config get-value account)
 
-if [[ -z "$PROJECT_ID" ]]; then
-  echo -e "${RED}No active project. Exiting.${RESET}"
-  exit 1
+REGION=$(gcloud compute project-info describe \
+--format="value(commonInstanceMetadata.items[google-compute-default-region])")
+
+if [[ -z "$REGION" ]]; then
+  REGION="us-central1"
 fi
 
-echo -e "${GREEN}Project: $PROJECT_ID${RESET}"
-echo -e "${GREEN}Account: $ACCOUNT${RESET}"
+gcloud config set project "$PROJECT_ID"
+gcloud config set compute/region "$REGION"
 
-############################
-# REGION
-############################
+echo "Project : $PROJECT_ID"
+echo "Region  : $REGION"
+echo "Account : $ACCOUNT"
 
-echo
-read -p "Enter Cloud Run region (example: us-central1): " REGION
-
-if ! gcloud compute regions list --format="value(name)" | grep -q "^$REGION$"; then
-  echo -e "${RED}Invalid region.${RESET}"
-  exit 1
-fi
-
-gcloud config set run/region "$REGION"
-
-############################
+########################################
 # ENABLE APIS
-############################
+########################################
 
-echo -e "${BLUE}Enabling APIs...${RESET}"
+echo -e "${BLUE}${BOLD}Enabling APIs...${RESET}"
 
 retry gcloud services enable \
   spanner.googleapis.com \
   artifactregistry.googleapis.com \
   run.googleapis.com
 
-############################
-# CLONE REPO
-############################
+########################################
+# NVM + NODE FIX
+########################################
 
-echo -e "${BLUE}Cloning repo...${RESET}"
+echo -e "${BLUE}${BOLD}Setting up Node (NVM)...${RESET}"
 
-cd ~
-rm -rf training-data-analyst
+export NVM_DIR="$HOME/.nvm"
 
-retry git clone https://github.com/GoogleCloudPlatform/training-data-analyst
+if [ ! -s "$NVM_DIR/nvm.sh" ]; then
+  echo "Installing NVM..."
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+fi
+
+source "$NVM_DIR/nvm.sh"
+
+retry nvm install 22.6
+nvm use 22.6
+nvm alias default 22.6
+
+node -v
+npm -v
+
+########################################
+# DOWNLOAD CODE
+########################################
+
+echo -e "${BLUE}${BOLD}Downloading Repo...${RESET}"
+
+if [ ! -d training-data-analyst ]; then
+  retry git clone https://github.com/GoogleCloudPlatform/training-data-analyst
+fi
 
 cd training-data-analyst/courses/cloud-spanner/omegatrade/
 
-############################
+########################################
 # BACKEND SETUP
-############################
+########################################
 
-echo -e "${BLUE}Setting backend env...${RESET}"
+echo -e "${BLUE}${BOLD}Backend Setup...${RESET}"
 
 cd backend
 
 cat > .env <<EOF
 PROJECTID=$PROJECT_ID
-INSTANCE=omegatrade-instance
-DATABASE=omegatrade-db
+INSTANCE=$INSTANCE
+DATABASE=$DATABASE
 JWT_KEY=w54p3Y?4dj%8Xqa2jjVC84narhe5Pk
 EXPIRE_IN=30d
 EOF
 
-############################
-# NODE SETUP
-############################
-
-echo -e "${BLUE}Installing Node...${RESET}"
-
-retry nvm install 22.6
-
 npm install -g npm
 npm install --loglevel=error
 
-############################
-# BUILD BACKEND
-############################
+########################################
+# DOCKER AUTH
+########################################
 
-echo -e "${BLUE}Building backend image...${RESET}"
+echo -e "${BLUE}${BOLD}Configuring Docker...${RESET}"
 
-retry docker build \
--t gcr.io/$PROJECT_ID/omega-trade/backend:v1 \
--f dockerfile.prod .
+retry gcloud auth configure-docker --quiet
 
-############################
-# PUSH BACKEND
-############################
+########################################
+# BUILD + PUSH BACKEND
+########################################
 
-echo -e "${BLUE}Auth docker...${RESET}"
+BACKEND_IMG="gcr.io/$PROJECT_ID/omega-trade/backend:v1"
 
-yes | gcloud auth configure-docker
+echo -e "${BLUE}${BOLD}Building Backend...${RESET}"
 
-echo -e "${BLUE}Pushing backend...${RESET}"
+retry docker build -t $BACKEND_IMG -f dockerfile.prod .
 
-retry docker push gcr.io/$PROJECT_ID/omega-trade/backend:v1
+retry docker push $BACKEND_IMG
 
-############################
+########################################
 # DEPLOY BACKEND
-############################
+########################################
 
-echo -e "${BLUE}Deploying backend...${RESET}"
+echo -e "${BLUE}${BOLD}Deploying Backend...${RESET}"
 
-BACKEND_URL=$(gcloud run deploy omegatrade-backend \
---platform managed \
---image gcr.io/$PROJECT_ID/omega-trade/backend:v1 \
---memory 512Mi \
---allow-unauthenticated \
---region $REGION \
---format="value(status.url)")
+BACKEND_URL=$(gcloud run deploy $BACKEND_SERVICE \
+  --platform managed \
+  --region $REGION \
+  --image $BACKEND_IMG \
+  --memory 512Mi \
+  --allow-unauthenticated \
+  --format="value(status.url)")
 
-echo -e "${GREEN}Backend URL:${RESET} $BACKEND_URL"
+echo "Backend URL: $BACKEND_URL"
 
-############################
-# SEED DATA (CHECKPOINT)
-############################
-
-echo -e "${BLUE}Seeding database...${RESET}"
+########################################
+# LOAD DATA
+########################################
 
 unset SPANNER_EMULATOR_HOST
 
+echo -e "${BLUE}${BOLD}Seeding Database...${RESET}"
+
 retry node seed-data.js
 
-echo
-echo -e "${GREEN}✅ CHECKPOINT: Click 'Check My Progress' for Task 4${RESET}"
-pause
+checkpoint "Import sample stock trade data"
 
-############################
-# FRONTEND CONFIG
-############################
+########################################
+# FRONTEND SETUP
+########################################
+
+echo -e "${BLUE}${BOLD}Frontend Setup...${RESET}"
 
 cd ../frontend/src/environments
 
-echo -e "${BLUE}Configuring frontend...${RESET}"
-
-cat > environment.ts <<EOF
-export const environment = {
-  production: false,
-  name: "dev",
-  baseUrl:"${BACKEND_URL}/api/v1/",
-  clientId: ""
-};
-EOF
-
-############################
-# BUILD FRONTEND
-############################
+sed -i "s|http://localhost:3000|$BACKEND_URL/api/v1|g" environment.ts
 
 cd ../..
 
 npm install -g npm
 npm install --loglevel=error
 
-echo -e "${BLUE}Building frontend...${RESET}"
+########################################
+# BUILD + PUSH FRONTEND
+########################################
 
-retry docker build \
--t gcr.io/$PROJECT_ID/omegatrade/frontend:v1 \
--f dockerfile .
+FRONTEND_IMG="gcr.io/$PROJECT_ID/omegatrade/frontend:v1"
 
-############################
-# PUSH FRONTEND
-############################
+echo -e "${BLUE}${BOLD}Building Frontend...${RESET}"
 
-retry docker push gcr.io/$PROJECT_ID/omegatrade/frontend:v1
+retry docker build -t $FRONTEND_IMG -f dockerfile .
 
-############################
+retry docker push $FRONTEND_IMG
+
+########################################
 # DEPLOY FRONTEND
-############################
+########################################
 
-FRONTEND_URL=$(gcloud run deploy omegatrade-frontend \
---platform managed \
---image gcr.io/$PROJECT_ID/omegatrade/frontend:v1 \
---allow-unauthenticated \
---region $REGION \
---format="value(status.url)")
+echo -e "${BLUE}${BOLD}Deploying Frontend...${RESET}"
 
-echo
-echo -e "${GREEN}Frontend URL:${RESET} $FRONTEND_URL"
+FRONTEND_URL=$(gcloud run deploy $FRONTEND_SERVICE \
+  --platform managed \
+  --region $REGION \
+  --image $FRONTEND_IMG \
+  --allow-unauthenticated \
+  --format="value(status.url)")
 
-############################
+echo "Frontend URL: $FRONTEND_URL"
+
+########################################
+# MANUAL APP TASKS
+########################################
+
+pause_manual "
+1. Open: $FRONTEND_URL
+2. Sign up:
+   admin@spanner1.com / Spanner1
+3. Add Company: Spanner1 (SPN)
+4. Run Simulation
+5. Rename Acme -> Coyote
+6. Update Bar Industries in Spanner Console
+"
+
+########################################
 # FINAL
-############################
+########################################
 
 echo
-echo -e "${GREEN}${BOLD}==================================${RESET}"
-echo -e "${GREEN}${BOLD}AUTOMATION COMPLETE${RESET}"
-echo -e "${GREEN}${BOLD}==================================${RESET}"
+echo -e "${GREEN}${BOLD}==============================================${RESET}"
+echo -e "${GREEN}${BOLD} GSP1051 AUTOMATION COMPLETE ${RESET}"
+echo -e "${GREEN}${BOLD}==============================================${RESET}"
+echo
+
+echo -e "${YELLOW}👉 FINAL STEP:${RESET}"
+echo -e "Click all remaining ${BOLD}Check My Progress${RESET} buttons"
 
 echo
-echo -e "${YELLOW}⚠️ Manual Tasks Remaining (No Automation Possible):${RESET}"
-
-echo "1. Open Frontend URL"
-echo "2. Create account"
-echo "3. Add company"
-echo "4. Run simulation"
-echo "5. Edit DB in Console"
-
+echo "Frontend URL:"
+echo "$FRONTEND_URL"
 echo
-echo -e "${GREEN}These steps do NOT affect scoring.${RESET}"
-
-echo
-echo -e "${BLUE}Frontend:${RESET} $FRONTEND_URL"
-echo -e "${BLUE}Backend:${RESET}  $BACKEND_URL"
-
-echo
-echo -e "${GREEN}Lab scoring complete after Task 4.${RESET}"
