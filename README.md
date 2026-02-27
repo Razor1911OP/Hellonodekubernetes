@@ -21,6 +21,13 @@ curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/
 sudo chmod +x GSP102.sh
 ./GSP102.sh
 ```
+
+```
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP118.sh
+sudo chmod +x GSP118.sh
+./GSP118.sh
+```
+
 ```
 curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP1021.sh
 sudo chmod +x GSP1021.sh
