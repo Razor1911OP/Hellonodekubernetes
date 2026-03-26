@@ -12,6 +12,11 @@ sudo chmod +x test.sh
 ./test.sh
 ```
 ```bash
+curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP1144.sh
+sudo chmod +x GSP1144.sh
+./GSP1144.sh
+```
+```bash
 curl -LO https://raw.githubusercontent.com/Razor1911OP/Hellonodekubernetes/main/GSP104.sh
 sudo chmod +x GSP104.sh
 ./GSP104.sh
